@@ -10,10 +10,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	chat "github.com/qtiso/chat_pubsub"
 )
+
+// ── Hardcoded test users (pre-seeded) ────────────────────────────────────────
+// In production these would come from your auth/user service.
+var testUsers = []chat.User{
+	{UUID: "user-alice-001", Name: "Alice", PhotoURL: "https://i.pravatar.cc/150?u=alice"},
+	{UUID: "user-bob-002", Name: "Bob", PhotoURL: "https://i.pravatar.cc/150?u=bob"},
+}
 
 func main() {
 	// ── 1. Load config (.env → env vars → defaults) ───────────────────────────
@@ -40,28 +46,49 @@ func main() {
 	// ── 4. Start hub (Pub/Sub + session cleanup) ──────────────────────────────
 	go module.Run(ctx)
 
-	// ── 5. Seed demo group ────────────────────────────────────────────────────
-	demoGroupID := uuid.New().String()
-	if err := module.CreateGroup(ctx, chat.Group{
+	// ── 5. Seed demo group + 2 test users ────────────────────────────────────
+	demoGroupID := "demo-group-001"
+	module.CreateGroup(ctx, chat.Group{
 		ID:        demoGroupID,
 		Name:      "Demo Room",
-		PhotoURL:  "https://example.com/demo.jpg",
+		PhotoURL:  "https://i.pravatar.cc/150?u=demoroom",
 		OwnerID:   "system",
-		MemberIDs: []string{},
 		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		log.Warn("could not create demo group", "error", err)
+	})
+	for _, u := range testUsers {
+		module.AddGroupMember(ctx, demoGroupID, u.UUID)
 	}
 
 	if module.IsAPIKeyAuthEnabled() {
 		log.Info("API key authentication enabled")
 	} else {
-		log.Warn("API key auth is DISABLED — set CHAT_API_KEYS in production")
+		log.Warn("API key auth DISABLED — set CHAT_API_KEYS in production")
 	}
+
+	log.Info("test users ready",
+		"alice_uuid", testUsers[0].UUID,
+		"bob_uuid", testUsers[1].UUID,
+		"group_id", demoGroupID,
+	)
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// ── 6. WebSocket server  (CHAT_WS_ADDR, default :8080) ───────────────────
 	// ─────────────────────────────────────────────────────────────────────────
+	//
+	// Connect:
+	//   ws://localhost:8080/ws
+	//   Header: X-API-Key: <key>   (or ?api_key=<key>)
+	//
+	// After connecting, send a JSON message:
+	//   {
+	//     "uuid":      "user-alice-001",   ← sender UUID
+	//     "name":      "Alice",            ← optional
+	//     "type":      "text",
+	//     "target_id": "user-bob-002",     ← PM recipient UUID
+	//     "is_group":  false,
+	//     "content":   "Hello Bob!"
+	//   }
+
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
@@ -70,54 +97,25 @@ func main() {
 
 	wsMux := http.NewServeMux()
 
-	// GET /ws?uuid=<UUID>&name=<Name>&photo=<URL>&token=<ReconnectToken>
-	// Auth: X-API-Key: <key>  OR  ?api_key=<key>
 	wsMux.Handle("/ws", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		userUUID := q.Get("uuid")
-		if userUUID == "" {
-			http.Error(w, `{"error":"missing uuid"}`, http.StatusBadRequest)
-			return
-		}
-
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Error("ws upgrade failed", "error", err, "uuid", userUUID)
+			log.Error("ws upgrade failed", "error", err)
 			return
 		}
 
-		user := chat.User{
-			UUID:     userUUID,
-			Name:     q.Get("name"),
-			PhotoURL: q.Get("photo"),
-		}
-
-		// Auto-join demo group.
-		if err := module.AddGroupMember(ctx, demoGroupID, userUUID); err != nil {
-			log.Warn("add group member failed", "error", err)
-		}
-
-		log.Info("user connected", "uuid", userUUID, "name", user.Name,
-			"reconnect", q.Get("token") != "")
-
+		// UUID is not required at connect — it comes in the first message.
+		// We pass an empty User here; handleIncoming will fill the real UUID.
 		module.Connect(conn, chat.ConnectOptions{
-			User:           user,
-			ReconnectToken: q.Get("token"),
-			HistoryConversations: map[string]bool{
-				demoGroupID: true,
-			},
+			ReconnectToken: r.URL.Query().Get("token"),
 		})
 	}))
 
-	wsServer := &http.Server{
-		Addr:    cfg.WSAddr,
-		Handler: wsMux,
-	}
-
+	wsServer := &http.Server{Addr: cfg.WSAddr, Handler: wsMux}
 	go func() {
 		log.Info("WebSocket server started", "addr", cfg.WSAddr)
 		if err := wsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("WebSocket server error", "error", err)
+			log.Error("ws server error", "error", err)
 			os.Exit(1)
 		}
 	}()
@@ -126,6 +124,16 @@ func main() {
 	// ── 7. REST API server  (CHAT_HTTP_ADDR, default :8081) ──────────────────
 	// ─────────────────────────────────────────────────────────────────────────
 	httpMux := http.NewServeMux()
+
+	// GET /users  — list test users (handy for copy-pasting UUIDs)
+	httpMux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"users":    testUsers,
+			"group_id": demoGroupID,
+			"hint":     "connect to ws://localhost:" + cfg.WSAddr[1:] + "/ws then send a message with uuid field",
+		})
+	})
 
 	// GET /chat-list?uuid=<UUID>
 	httpMux.Handle("/chat-list", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +144,6 @@ func main() {
 		}
 		list, err := module.GetChatList(r.Context(), userUUID, 20)
 		if err != nil {
-			log.Error("get chat list failed", "error", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -147,16 +154,15 @@ func main() {
 	// GET /history?uuid=<UUID>&conv=<ConvID>&group=true&last_id=<StreamID>
 	httpMux.Handle("/history", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		userUUID := q.Get("uuid")
-		convID := q.Get("conv")
-		isGroup := q.Get("group") == "true"
-		lastID := q.Get("last_id")
-		if lastID == "" {
-			lastID = "0"
-		}
-		msgs, err := module.GetHistory(r.Context(), userUUID, convID, isGroup, lastID, 50)
+		msgs, err := module.GetHistory(r.Context(),
+			q.Get("uuid"), q.Get("conv"), q.Get("group") == "true",
+			func() string {
+				if id := q.Get("last_id"); id != "" {
+					return id
+				}
+				return "0"
+			}(), 50)
 		if err != nil {
-			log.Error("get history failed", "error", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -185,35 +191,39 @@ func main() {
 			return
 		}
 		if err := module.AddGroupMember(r.Context(), body.GroupID, body.UserUUID); err != nil {
-			log.Error("add group member failed", "error", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
-	httpServer := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: httpMux,
-	}
-
+	httpServer := &http.Server{Addr: cfg.HTTPAddr, Handler: httpMux}
 	go func() {
 		log.Info("REST API server started", "addr", cfg.HTTPAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("REST server error", "error", err)
+			log.Error("rest server error", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	// ── 8. Wait for shutdown ──────────────────────────────────────────────────
+	// ── 8. Print quick-test cheatsheet ───────────────────────────────────────
+	log.Info("──────────────────────────────────────────")
+	log.Info("QUICK TEST — open 2 WebSocket connections:")
+	log.Info("  Alice", "connect", "ws://localhost"+cfg.WSAddr+"/ws")
+	log.Info("  Bob  ", "connect", "ws://localhost"+cfg.WSAddr+"/ws")
+	log.Info("Send from Alice → Bob:")
+	log.Info(`  {"uuid":"user-alice-001","name":"Alice","type":"text","target_id":"user-bob-002","is_group":false,"content":"Hello Bob!"}`)
+	log.Info("Send to group:")
+	log.Info(`  {"uuid":"user-alice-001","type":"text","target_id":"demo-group-001","is_group":true,"content":"Hey group!"}`)
+	log.Info("REST: GET users list", "url", "http://localhost"+cfg.HTTPAddr+"/users")
+	log.Info("──────────────────────────────────────────")
+
+	// ── 9. Wait for shutdown ──────────────────────────────────────────────────
 	<-ctx.Done()
 	log.Info("shutting down...")
-
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
-
 	wsServer.Shutdown(shutCtx)
 	httpServer.Shutdown(shutCtx)
-
 	log.Info("goodbye")
 }

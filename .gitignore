@@ -4,6 +4,9 @@
 *.so
 *.dylib
 
+# Air live-reload build output
+tmp/
+
 # Go test artifacts
 *.test
 *.out

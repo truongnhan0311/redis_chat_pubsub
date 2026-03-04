@@ -20,7 +20,7 @@ const (
 type Client struct {
 	hub    *Hub
 	conn   *websocket.Conn
-	send   chan Message // Buffered outbound channel (graceful degradation).
+	send   chan any // Buffered outbound channel; accepts Message or SystemMessage.
 	user   User
 	token  string // Reconnect token tied to this session.
 	logger *log.Logger
@@ -72,10 +72,11 @@ func (c *Client) ReadPump(ctx context.Context) {
 	}
 }
 
-// WritePump writes queued messages to the WebSocket.
+// WritePump writes queued frames to the WebSocket.
 // It runs in its own goroutine per client.
-// All outbound frames are Message JSON — the client distinguishes system
-// frames by checking msg.SenderID == "SYSTEM".
+// The send channel accepts two frame types:
+//   - Message        → regular chat message (server → client)
+//   - SystemMessage  → system event (session token, errors, acks)
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -85,14 +86,13 @@ func (c *Client) WritePump() {
 
 	for {
 		select {
-		case msg, ok := <-c.send:
+		case frame, ok := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// Hub closed the channel.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			if err := c.conn.WriteJSON(msg); err != nil {
+			if err := c.conn.WriteJSON(frame); err != nil {
 				c.logger.Printf("[client] write error for %s: %v", c.user.UUID, err)
 				return
 			}
@@ -108,6 +108,28 @@ func (c *Client) WritePump() {
 
 // handleIncoming routes a message from a client through the hub.
 func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming IncomingMessage) {
+	// The sender's UUID comes from the message itself.
+	// If it differs from what we have (e.g. the temp auto-generated UUID),
+	// re-register the client under the correct UUID.
+	if incoming.UUID != "" && incoming.UUID != sender.user.UUID {
+		h.mu.Lock()
+		// Remove old temp registration.
+		if c, ok := h.clients[sender.user.UUID]; ok && c == sender {
+			delete(h.clients, sender.user.UUID)
+		}
+		// Update client identity.
+		sender.user.UUID = incoming.UUID
+		if incoming.Name != "" {
+			sender.user.Name = incoming.Name
+		}
+		if incoming.Photo != "" {
+			sender.user.PhotoURL = incoming.Photo
+		}
+		// Register under the real UUID.
+		h.clients[sender.user.UUID] = sender
+		h.mu.Unlock()
+	}
+
 	msg := Message{
 		Type:        incoming.Type,
 		SenderID:    sender.user.UUID,
@@ -120,8 +142,7 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 		Timestamp:   time.Now().UTC(),
 	}
 
-	// For group messages, hydrate group info so recipients can render the
-	// conversation header (name, photo) without an extra API call.
+	// For group messages, hydrate group info.
 	if incoming.IsGroup {
 		msg.GroupID = incoming.TargetID
 		if g, err := h.groups.GetGroup(ctx, incoming.TargetID); err == nil {
@@ -130,7 +151,7 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 		}
 	}
 
-	// 1. Persist to Redis Stream first (Write-Ahead pattern).
+	// 1. Persist to Redis Stream.
 	streamID, err := h.SaveMessage(ctx, msg)
 	if err != nil {
 		h.logger.Printf("[hub] failed to save message: %v", err)
@@ -138,19 +159,18 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 	}
 	msg.ID = streamID
 
-	// Update sender's session with the latest stream ID.
+	// Update session's last-seen pointer.
 	if sess, ok := h.sessions.getByUser(sender.user.UUID); ok {
 		sess.updateLastSeen(incoming.TargetID, streamID)
 		go h.sessions.persist(ctx, sess)
 	}
 
-	// 2. Deliver to recipients.
+	// 2. Deliver.
 	if incoming.IsGroup {
 		h.deliverToGroup(ctx, msg)
 	} else {
-		// PM: deliver to recipient and echo back to sender.
 		h.Publish(ctx, incoming.TargetID, msg)
-		h.deliverLocally(sender.user.UUID, msg)
+		h.deliverLocally(sender.user.UUID, msg) // echo to sender
 	}
 }
 

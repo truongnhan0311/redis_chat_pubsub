@@ -81,7 +81,25 @@ type MessageMetadata struct {
 // IncomingMessage is the JSON payload a CLIENT sends to the App Server
 // over its WebSocket connection.
 //
-// ── PM (private message) ─────────────────────────────────────────────────────
+// The FIRST message a client sends after opening the WebSocket connection
+// MUST include uuid (and optionally name/photo/token) to identify the user
+// and optionally provide a reconnect token to resume a previous session.
+// The server expects this within 10 seconds or the connection is closed.
+//
+// Server responds with a SystemMessage frame:
+//
+//	{ "kind": "session", "payload": "<session-token>", "uuid": "alice-001" }
+//
+// ── First message (identity) ──────────────────────────────────────────────────
+//
+//	{
+//	  "uuid":  "alice-001",            ← who is this user
+//	  "name":  "Alice",                ← display name (optional)
+//	  "photo": "https://cdn/alice.jpg",← avatar (optional)
+//	  "token": "prev-session-token"    ← reconnect token (empty = new session)
+//	}
+//
+// ── Subsequent messages (PM) ──────────────────────────────────────────────────
 //
 //	{
 //	  "type":      "text",
@@ -94,7 +112,7 @@ type MessageMetadata struct {
 //
 //	{
 //	  "type":      "text",
-//	  "target_id": "<group-uuid>",   ← this IS the group_id
+//	  "target_id": "<group-uuid>",
 //	  "is_group":  true,
 //	  "content":   "Hey everyone!"
 //	}
@@ -109,18 +127,48 @@ type MessageMetadata struct {
 //	  "metadata":  { "file_name":"photo.jpg","file_size":204800,
 //	                 "mime_type":"image/jpeg","width":1280,"height":720 }
 //	}
+//
+// IncomingMessage is every message a client sends over WebSocket.
+// Each message carries the sender's uuid — no separate init/handshake needed.
+//
+// Wire format (PM):
+//
+//	{
+//	  "uuid":      "alice-001",   ← sender's user UUID (required)
+//	  "name":      "Alice",       ← sender display name (optional, updates on each send)
+//	  "type":      "text",
+//	  "target_id": "bob-001",     ← recipient UUID (PM) or group UUID
+//	  "is_group":  false,
+//	  "content":   "Hello!"
+//	}
+//
+// Wire format (group):
+//
+//	{
+//	  "uuid":      "alice-001",
+//	  "type":      "text",
+//	  "target_id": "<group-uuid>",
+//	  "is_group":  true,
+//	  "content":   "Hey everyone!"
+//	}
 type IncomingMessage struct {
-	Type     MessageType     `json:"type"`      // required: text|image|pdf|voice|video
-	TargetID string          `json:"target_id"` // required: user UUID (PM) or group UUID
-	IsGroup  bool            `json:"is_group"`  // true = group message; target_id is group UUID
-	Content  string          `json:"content"`   // required: text body OR media URL (S3/CDN)
+	UUID     string          `json:"uuid"`               // required: sender's user UUID
+	Name     string          `json:"name,omitempty"`     // optional: display name
+	Photo    string          `json:"photo,omitempty"`    // optional: avatar URL
+	Type     MessageType     `json:"type"`               // required: text|image|pdf|voice|video
+	TargetID string          `json:"target_id"`          // required: recipient UUID or group UUID
+	IsGroup  bool            `json:"is_group,omitempty"` // true = group message
+	Content  string          `json:"content"`            // required: text or media URL
 	Metadata MessageMetadata `json:"metadata,omitempty"`
 }
 
 // Validate returns an error if any required field is missing or invalid.
 func (m *IncomingMessage) Validate() error {
+	if m.UUID == "" {
+		return fmt.Errorf("uuid is required")
+	}
 	if !validMessageTypes[m.Type] {
-		return fmt.Errorf("unknown message type %q (valid: text|image|pdf|voice|video)", m.Type)
+		return fmt.Errorf("unknown type %q (valid: text|image|pdf|voice|video)", m.Type)
 	}
 	if m.TargetID == "" {
 		return fmt.Errorf("target_id is required")

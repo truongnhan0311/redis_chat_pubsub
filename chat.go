@@ -193,7 +193,7 @@ func (cm *ChatModule) Connect(conn *websocket.Conn, opts ConnectOptions) {
 	client := &Client{
 		hub:    cm.hub,
 		conn:   conn,
-		send:   make(chan Message, sendBufferSize),
+		send:   make(chan any, sendBufferSize),
 		user:   opts.User,
 		token:  token,
 		logger: cm.logger,
@@ -201,16 +201,17 @@ func (cm *ChatModule) Connect(conn *websocket.Conn, opts ConnectOptions) {
 
 	cm.hub.register(client)
 
-	// Send the session token to the client immediately so it can persist it.
-	sessionMsg := Message{
-		ID:        "SYSTEM_SESSION",
-		Type:      MessageTypeText,
-		SenderID:  "SYSTEM",
-		TargetID:  opts.User.UUID,
-		Content:   token,
-		Timestamp: time.Now().UTC(),
+	// Send session frame immediately so client knows:
+	//   - its assigned UUID (important when server auto-generated it)
+	//   - the reconnect token to persist for future reconnects
+	//
+	// Frame format:
+	//   { "kind": "session", "uuid": "<user-uuid>", "payload": "<token>" }
+	client.send <- map[string]string{
+		"kind":    "session",
+		"uuid":    sess.UserUUID,
+		"payload": token,
 	}
-	client.send <- sessionMsg
 
 	// Replay missed messages for each requested conversation.
 	for convID, isGroup := range opts.HistoryConversations {
