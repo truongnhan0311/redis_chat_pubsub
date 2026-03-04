@@ -80,7 +80,7 @@ func New(cfg Config) (*ChatModule, error) {
 		originFn = func(r *http.Request) bool { return true }
 	}
 
-	sm := newSessionManager()
+	sm := newSessionManager(rdb)
 	gm := newGroupManager(rdb)
 	hub := newHub(rdb, sm, gm, logger)
 

@@ -84,29 +84,34 @@ func (h *Hub) SaveMessage(ctx context.Context, m Message) (streamID string, err 
 
 // ReplayHistory fetches messages the user missed while offline and sends them to the client.
 // lastID is the Redis Stream ID of the last message the user saw; use "0" for all history.
+//
+// Uses XRange (not XRead) so it returns immediately even when the stream is empty.
+// XRead with Block:0 would block forever on an empty stream, hanging the connect flow.
 func (h *Hub) ReplayHistory(ctx context.Context, client *Client, conversationID string, isGroup bool, lastID string) error {
 	streamKey := conversationStreamKey(client.user.UUID, conversationID, isGroup)
 	if isGroup {
 		streamKey = fmt.Sprintf(streamKeyFmt, conversationID)
 	}
 
-	entries, err := h.redis.XRead(ctx, &redis.XReadArgs{
-		Streams: []string{streamKey, lastID},
-		Count:   replayBatchSize,
-		Block:   0,
-	}).Result()
-	if err == redis.Nil {
-		return nil // No new messages.
-	}
-	if err != nil {
-		return fmt.Errorf("xread: %w", err)
+	// XRange reads entries synchronously; "+" means "up to the latest entry".
+	// Exclusive start: append "-" suffix to lastID to skip the already-seen entry.
+	start := lastID
+	if start != "0" {
+		start = "(" + lastID // Redis exclusive range syntax
 	}
 
-	if len(entries) == 0 || len(entries[0].Messages) == 0 {
+	xmsgs, err := h.redis.XRangeN(ctx, streamKey, start, "+", replayBatchSize).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil
+		}
+		return fmt.Errorf("xrange: %w", err)
+	}
+	if len(xmsgs) == 0 {
 		return nil
 	}
 
-	for _, xmsg := range entries[0].Messages {
+	for _, xmsg := range xmsgs {
 		payload, ok := xmsg.Values["payload"].(string)
 		if !ok {
 			continue
@@ -123,9 +128,10 @@ func (h *Hub) ReplayHistory(ctx context.Context, client *Client, conversationID 
 	}
 
 	// Update the session's last-seen pointer for this conversation.
-	lastXID := entries[0].Messages[len(entries[0].Messages)-1].ID
+	lastXID := xmsgs[len(xmsgs)-1].ID
 	if sess, ok := h.sessions.getByUser(client.user.UUID); ok {
 		sess.updateLastSeen(conversationID, lastXID)
+		go h.sessions.persist(context.Background(), sess) // Persist updated pointer to Redis.
 	}
 
 	return nil
