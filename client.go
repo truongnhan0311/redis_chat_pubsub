@@ -62,12 +62,20 @@ func (c *Client) ReadPump(ctx context.Context) {
 			continue
 		}
 
+		// Validate required fields before doing any work.
+		if err := incoming.Validate(); err != nil {
+			c.logger.Printf("[client] invalid message from %s: %v", c.user.UUID, err)
+			continue
+		}
+
 		c.hub.handleIncoming(ctx, c, incoming)
 	}
 }
 
 // WritePump writes queued messages to the WebSocket.
 // It runs in its own goroutine per client.
+// All outbound frames are Message JSON — the client distinguishes system
+// frames by checking msg.SenderID == "SYSTEM".
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
