@@ -26,6 +26,14 @@ type Config struct {
 	// query parameter. Leave empty to disable authentication (development only).
 	APIKeys []string
 
+	// WSAddr is the listen address for the WebSocket server (e.g. ":8080").
+	// Read from CHAT_WS_ADDR env var. Defaults to ":8080".
+	WSAddr string
+
+	// HTTPAddr is the listen address for the REST API server (e.g. ":8081").
+	// Read from CHAT_HTTP_ADDR env var. Defaults to ":8081".
+	HTTPAddr string
+
 	// Logger is the standard library logger (used internally as a fallback).
 	// If nil, one is derived from SlogLogger or created pointing to os.Stdout.
 	Logger *log.Logger

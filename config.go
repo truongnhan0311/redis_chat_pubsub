@@ -16,11 +16,14 @@ import (
 //
 // Variables read (all optional, with defaults):
 //
-//	CHAT_REDIS_ADDR      — Redis address        (default: localhost:6379)
-//	CHAT_REDIS_PASSWORD  — Redis password        (default: "")
-//	CHAT_REDIS_DB        — Redis DB index        (default: 0)
+//	CHAT_REDIS_ADDR      — Redis address             (default: localhost:6379)
+//	CHAT_REDIS_PASSWORD  — Redis password             (default: "")
+//	CHAT_REDIS_DB        — Redis DB index             (default: 0)
+//	CHAT_API_KEYS        — Comma-separated API keys   (default: "" = disabled)
+//	CHAT_WS_ADDR         — WebSocket server address   (default: :8080)
+//	CHAT_HTTP_ADDR       — REST API server address    (default: :8081)
 //	CHAT_LOG_LEVEL       — Log level: debug|info|warn|error (default: info)
-//	CHAT_LOG_FORMAT      — Log format: text|json (default: text)
+//	CHAT_LOG_FORMAT      — Log format: text|json      (default: text)
 //
 // Typical usage:
 //
@@ -64,15 +67,27 @@ func LoadConfigFromEnv(envFile string) (Config, error) {
 		os.Getenv("CHAT_LOG_FORMAT"),
 	)
 
+	// Server addresses.
+	wsAddr := os.Getenv("CHAT_WS_ADDR")
+	if wsAddr == "" {
+		wsAddr = ":8080"
+	}
+	httpAddr := os.Getenv("CHAT_HTTP_ADDR")
+	if httpAddr == "" {
+		httpAddr = ":8081"
+	}
+
 	return Config{
 		RedisAddr:     redisAddr,
 		RedisPassword: os.Getenv("CHAT_REDIS_PASSWORD"),
 		RedisDB:       redisDB,
 		APIKeys:       apiKeys,
+		WSAddr:        wsAddr,
+		HTTPAddr:      httpAddr,
 		Logger:        slog.NewLogLogger(logger.Handler(), slog.LevelInfo),
 		SlogLogger:    logger,
 		AllowedOriginFn: func(r *http.Request) bool {
-			return true // override via CHAT_ALLOWED_ORIGINS if needed
+			return true
 		},
 	}, nil
 }
