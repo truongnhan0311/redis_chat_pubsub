@@ -1,0 +1,19 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test artifacts
+*.test
+*.out
+
+# .env (never commit real secrets)
+.env
+
+# WAL files
+*.wal
+
+# Build output
+/bin/
+/dist/
