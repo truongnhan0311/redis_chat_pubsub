@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -48,6 +49,16 @@ func LoadConfigFromEnv(envFile string) (Config, error) {
 		redisAddr = "localhost:6379"
 	}
 
+	// Parse API keys (comma-separated).
+	var apiKeys []string
+	if raw := os.Getenv("CHAT_API_KEYS"); raw != "" {
+		for _, k := range strings.Split(raw, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				apiKeys = append(apiKeys, k)
+			}
+		}
+	}
+
 	logger := NewSlogLogger(
 		os.Getenv("CHAT_LOG_LEVEL"),
 		os.Getenv("CHAT_LOG_FORMAT"),
@@ -57,6 +68,7 @@ func LoadConfigFromEnv(envFile string) (Config, error) {
 		RedisAddr:     redisAddr,
 		RedisPassword: os.Getenv("CHAT_REDIS_PASSWORD"),
 		RedisDB:       redisDB,
+		APIKeys:       apiKeys,
 		Logger:        slog.NewLogLogger(logger.Handler(), slog.LevelInfo),
 		SlogLogger:    logger,
 		AllowedOriginFn: func(r *http.Request) bool {

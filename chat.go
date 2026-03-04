@@ -21,6 +21,11 @@ type Config struct {
 	RedisPassword string
 	RedisDB       int
 
+	// APIKeys is the list of valid API keys for server-to-server authentication.
+	// Clients must send one of these keys via the X-API-Key header or ?api_key=
+	// query parameter. Leave empty to disable authentication (development only).
+	APIKeys []string
+
 	// Logger is the standard library logger (used internally as a fallback).
 	// If nil, one is derived from SlogLogger or created pointing to os.Stdout.
 	Logger *log.Logger
@@ -45,6 +50,7 @@ type ChatModule struct {
 	logger   *log.Logger
 	slog     *slog.Logger
 	redis    *redis.Client
+	apiKeys  *apiKeyStore
 }
 
 // New initialises the chat module, validates the Redis connection, and returns
@@ -93,9 +99,10 @@ func New(cfg Config) (*ChatModule, error) {
 			WriteBufferSize: 4096,
 			CheckOrigin:     originFn,
 		},
-		logger: logger,
-		slog:   sl,
-		redis:  rdb,
+		logger:  logger,
+		slog:    sl,
+		redis:   rdb,
+		apiKeys: newAPIKeyStore(cfg.APIKeys),
 	}, nil
 }
 

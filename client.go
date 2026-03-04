@@ -120,6 +120,16 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 		Timestamp:   time.Now().UTC(),
 	}
 
+	// For group messages, hydrate group info so recipients can render the
+	// conversation header (name, photo) without an extra API call.
+	if incoming.IsGroup {
+		msg.GroupID = incoming.TargetID
+		if g, err := h.groups.GetGroup(ctx, incoming.TargetID); err == nil {
+			msg.GroupName = g.Name
+			msg.GroupPhoto = g.PhotoURL
+		}
+	}
+
 	// 1. Persist to Redis Stream first (Write-Ahead pattern).
 	streamID, err := h.SaveMessage(ctx, msg)
 	if err != nil {
@@ -130,8 +140,8 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 
 	// Update sender's session with the latest stream ID.
 	if sess, ok := h.sessions.getByUser(sender.user.UUID); ok {
-		convKey := incoming.TargetID
-		sess.updateLastSeen(convKey, streamID)
+		sess.updateLastSeen(incoming.TargetID, streamID)
+		go h.sessions.persist(ctx, sess)
 	}
 
 	// 2. Deliver to recipients.
@@ -140,7 +150,7 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 	} else {
 		// PM: deliver to recipient and echo back to sender.
 		h.Publish(ctx, incoming.TargetID, msg)
-		h.deliverLocally(sender.user.UUID, msg) // Echo to sender for acknowledgement.
+		h.deliverLocally(sender.user.UUID, msg)
 	}
 }
 

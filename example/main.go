@@ -62,8 +62,15 @@ func main() {
 	// ── 6. HTTP routes ───────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 
+	if module.IsAPIKeyAuthEnabled() {
+		log.Info("API key authentication enabled")
+	} else {
+		log.Warn("API key auth is DISABLED — set CHAT_API_KEYS in production")
+	}
+
 	// GET /ws?uuid=<UUID>&name=<Name>&photo=<URL>&token=<ReconnectToken>
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	// Header: X-API-Key: <key>  (or ?api_key=<key>)
+	mux.Handle("/ws", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		userUUID := q.Get("uuid")
 		if userUUID == "" {
@@ -97,10 +104,10 @@ func main() {
 				demoGroupID: true,
 			},
 		})
-	})
+	}))
 
 	// GET /chat-list?uuid=<UUID>
-	mux.HandleFunc("/chat-list", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/chat-list", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
 		userUUID := r.URL.Query().Get("uuid")
 		if userUUID == "" {
 			http.Error(w, "missing uuid", http.StatusBadRequest)
@@ -114,10 +121,10 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
-	})
+	}))
 
 	// GET /history?uuid=<UUID>&conv=<ConvID>&group=true&last_id=<StreamID>
-	mux.HandleFunc("/history", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/history", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		userUUID := q.Get("uuid")
 		convID := q.Get("conv")
@@ -134,16 +141,16 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(msgs)
-	})
+	}))
 
 	// GET /online
-	mux.HandleFunc("/online", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/online", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(module.OnlineUsers())
-	})
+	}))
 
 	// POST /group/member  body: {"group_id":"...","user_uuid":"..."}
-	mux.HandleFunc("/group/member", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/group/member", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -162,7 +169,7 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}))
 
 	// ── 7. Start server ───────────────────────────────────────────────────────
 	addr := os.Getenv("CHAT_SERVER_ADDR")

@@ -16,7 +16,6 @@ const (
 	MessageTypeVideo MessageType = "video"
 )
 
-// validMessageTypes is the whitelist used during incoming message validation.
 var validMessageTypes = map[MessageType]bool{
 	MessageTypeText:  true,
 	MessageTypeImage: true,
@@ -32,54 +31,96 @@ type User struct {
 	PhotoURL string `json:"photo_url"`
 }
 
-// MessageMetadata holds extra info for multimedia messages.
+// ─────────────────────────────────────────────────────────────────────────────
+// MessageMetadata — filled per message type
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Which fields to populate per type:
+//
+//	"text"  → all fields are empty/zero
+//
+//	"image" → file_name, file_size, mime_type ("image/jpeg"|"image/png"|…),
+//	           width, height
+//	           Example:
+//	           { "file_name":"photo.jpg","file_size":204800,
+//	             "mime_type":"image/jpeg","width":1280,"height":720 }
+//
+//	"pdf"   → file_name, file_size, mime_type ("application/pdf"),
+//	           page_count
+//	           Example:
+//	           { "file_name":"report.pdf","file_size":512000,
+//	             "mime_type":"application/pdf","page_count":12 }
+//
+//	"voice" → file_name, file_size, mime_type ("audio/ogg"|"audio/mp4"|…),
+//	           duration (seconds)
+//	           Example:
+//	           { "file_name":"voice.ogg","file_size":32768,
+//	             "mime_type":"audio/ogg","duration":15 }
+//
+//	"video" → file_name, file_size, mime_type ("video/mp4"|…),
+//	           width, height, duration (seconds), thumbnail (preview URL)
+//	           Example:
+//	           { "file_name":"clip.mp4","file_size":5242880,
+//	             "mime_type":"video/mp4","width":1920,"height":1080,
+//	             "duration":30,"thumbnail":"https://cdn.example.com/thumb.jpg" }
 type MessageMetadata struct {
-	FileName  string `json:"file_name,omitempty"`
-	FileSize  int64  `json:"file_size,omitempty"` // in bytes
-	MimeType  string `json:"mime_type,omitempty"`
-	Duration  int    `json:"duration,omitempty"`  // seconds (for voice/video)
-	Width     int    `json:"width,omitempty"`     // pixels (for image/video)
-	Height    int    `json:"height,omitempty"`    // pixels (for image/video)
-	Thumbnail string `json:"thumbnail,omitempty"` // preview URL (for video)
+	FileName  string `json:"file_name,omitempty"`  // all media types
+	FileSize  int64  `json:"file_size,omitempty"`  // bytes; all media types
+	MimeType  string `json:"mime_type,omitempty"`  // all media types
+	Duration  int    `json:"duration,omitempty"`   // seconds: voice, video
+	Width     int    `json:"width,omitempty"`      // pixels: image, video
+	Height    int    `json:"height,omitempty"`     // pixels: image, video
+	Thumbnail string `json:"thumbnail,omitempty"`  // CDN URL: video preview
+	PageCount int    `json:"page_count,omitempty"` // pdf only
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire formats — exactly what JSON flows over the wire at each layer.
+// Wire formats
 // ─────────────────────────────────────────────────────────────────────────────
 
 // IncomingMessage is the JSON payload a CLIENT sends to the App Server
-// over the WebSocket connection.
+// over its WebSocket connection.
 //
-// Wire example — PM text message:
+// ── PM (private message) ─────────────────────────────────────────────────────
 //
 //	{
 //	  "type":      "text",
-//	  "target_id": "uuid-of-recipient",
+//	  "target_id": "<recipient-user-uuid>",
 //	  "is_group":  false,
-//	  "content":   "Hello!"
+//	  "content":   "Hello Bob!"
 //	}
 //
-// Wire example — Group image message:
+// ── Group message ─────────────────────────────────────────────────────────────
+//
+//	{
+//	  "type":      "text",
+//	  "target_id": "<group-uuid>",   ← this IS the group_id
+//	  "is_group":  true,
+//	  "content":   "Hey everyone!"
+//	}
+//
+// ── Multimedia (image example) ────────────────────────────────────────────────
 //
 //	{
 //	  "type":      "image",
-//	  "target_id": "group-uuid",
-//	  "is_group":  true,
+//	  "target_id": "<uuid>",
+//	  "is_group":  false,
 //	  "content":   "https://cdn.example.com/photo.jpg",
-//	  "metadata":  { "file_name": "photo.jpg", "file_size": 204800, "mime_type": "image/jpeg", "width": 1280, "height": 720 }
+//	  "metadata":  { "file_name":"photo.jpg","file_size":204800,
+//	                 "mime_type":"image/jpeg","width":1280,"height":720 }
 //	}
 type IncomingMessage struct {
-	Type     MessageType     `json:"type"`      // required: text | image | pdf | voice | video
-	TargetID string          `json:"target_id"` // required: recipient UUID (PM) or group UUID
-	IsGroup  bool            `json:"is_group"`  // true = group chat
+	Type     MessageType     `json:"type"`      // required: text|image|pdf|voice|video
+	TargetID string          `json:"target_id"` // required: user UUID (PM) or group UUID
+	IsGroup  bool            `json:"is_group"`  // true = group message; target_id is group UUID
 	Content  string          `json:"content"`   // required: text body OR media URL (S3/CDN)
 	Metadata MessageMetadata `json:"metadata,omitempty"`
 }
 
-// Validate checks that the incoming message has all required fields.
+// Validate returns an error if any required field is missing or invalid.
 func (m *IncomingMessage) Validate() error {
 	if !validMessageTypes[m.Type] {
-		return fmt.Errorf("unknown message type %q", m.Type)
+		return fmt.Errorf("unknown message type %q (valid: text|image|pdf|voice|video)", m.Type)
 	}
 	if m.TargetID == "" {
 		return fmt.Errorf("target_id is required")
@@ -90,68 +131,61 @@ func (m *IncomingMessage) Validate() error {
 	return nil
 }
 
-// Message is the fully-hydrated message struct:
-//   - Stored in Redis Streams (persistence layer).
-//   - Sent SERVER → CLIENT over WebSocket.
-//   - Wrapped in pubSubEnvelope for SERVER ↔ SERVER delivery via Redis Pub/Sub.
+// Message is the fully-hydrated message struct sent SERVER → CLIENT.
+// It is also the payload stored in Redis Streams and wrapped in
+// pubSubEnvelope for SERVER ↔ SERVER delivery.
 //
-// Wire example (server → client WebSocket):
+// ── PM example (server → client) ─────────────────────────────────────────────
 //
 //	{
 //	  "id":           "1714000000123-0",
 //	  "type":         "text",
-//	  "sender_id":    "uuid-of-alice",
+//	  "sender_id":    "<alice-uuid>",
 //	  "sender_name":  "Alice",
 //	  "sender_photo": "https://cdn.example.com/alice.jpg",
-//	  "target_id":    "uuid-of-bob",
+//	  "target_id":    "<bob-uuid>",
 //	  "is_group":     false,
 //	  "content":      "Hello Bob!",
 //	  "timestamp":    "2024-05-01T12:00:00.000Z"
 //	}
-type Message struct {
-	ID          string          `json:"id"` // Redis Stream entry ID (e.g. "1714000000123-0")
-	Type        MessageType     `json:"type"`
-	SenderID    string          `json:"sender_id"`
-	SenderName  string          `json:"sender_name"`
-	SenderPhoto string          `json:"sender_photo"`
-	TargetID    string          `json:"target_id"` // user UUID for PM, group UUID for group
-	IsGroup     bool            `json:"is_group"`
-	Content     string          `json:"content"` // text body or media URL
-	Metadata    MessageMetadata `json:"metadata,omitempty"`
-	Timestamp   time.Time       `json:"timestamp"`
-	DeliveredAt *time.Time      `json:"delivered_at,omitempty"` // set when ACK received from recipient
-	ReadAt      *time.Time      `json:"read_at,omitempty"`
-}
-
-// pubSubEnvelope is the JSON format used for SERVER ↔ SERVER communication
-// over Redis Pub/Sub (channel: "chat:pubsub:global").
 //
-// When App Server 1 receives a message for a user who is connected to
-// App Server 2, it publishes this envelope to Redis. App Server 2 receives
-// it via its Pub/Sub subscription, extracts the Message, and forwards it
-// to the recipient's WebSocket.
-//
-// Wire example (Redis Pub/Sub payload):
+// ── Group example (server → client) ──────────────────────────────────────────
 //
 //	{
-//	  "recipient_id": "uuid-of-bob",
-//	  "message": {
-//	    "id":          "1714000000123-0",
-//	    "type":        "text",
-//	    "sender_id":   "uuid-of-alice",
-//	    "sender_name": "Alice",
-//	    "target_id":   "uuid-of-bob",
-//	    "content":     "Hello Bob!",
-//	    "timestamp":   "2024-05-01T12:00:00.000Z"
-//	  }
+//	  "id":           "1714000000456-0",
+//	  "type":         "image",
+//	  "sender_id":    "<alice-uuid>",
+//	  "sender_name":  "Alice",
+//	  "sender_photo": "https://cdn.example.com/alice.jpg",
+//	  "target_id":    "<group-uuid>",
+//	  "group_id":     "<group-uuid>",
+//	  "group_name":   "Team Chat",
+//	  "group_photo":  "https://cdn.example.com/team.jpg",
+//	  "is_group":     true,
+//	  "content":      "https://cdn.example.com/photo.jpg",
+//	  "metadata":     { "file_name":"photo.jpg","file_size":204800,
+//	                    "mime_type":"image/jpeg","width":1280,"height":720 },
+//	  "timestamp":    "2024-05-01T12:01:00.000Z"
 //	}
-//
-// Note: pubSubEnvelope is defined in hub.go where it is used.
-// It is documented here for discoverability.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Other event types (client ↔ server)
-// ─────────────────────────────────────────────────────────────────────────────
+type Message struct {
+	ID          string      `json:"id"` // Redis Stream entry ID
+	Type        MessageType `json:"type"`
+	SenderID    string      `json:"sender_id"`
+	SenderName  string      `json:"sender_name"`
+	SenderPhoto string      `json:"sender_photo"`
+	TargetID    string      `json:"target_id"` // user UUID (PM) or group UUID
+	IsGroup     bool        `json:"is_group"`
+	// Group info — populated for group messages so the recipient can render
+	// the conversation header without an extra API call.
+	GroupID     string          `json:"group_id,omitempty"`
+	GroupName   string          `json:"group_name,omitempty"`
+	GroupPhoto  string          `json:"group_photo,omitempty"`
+	Content     string          `json:"content"`
+	Metadata    MessageMetadata `json:"metadata,omitempty"`
+	Timestamp   time.Time       `json:"timestamp"`
+	DeliveredAt *time.Time      `json:"delivered_at,omitempty"`
+	ReadAt      *time.Time      `json:"read_at,omitempty"`
+}
 
 // Group represents a group chat room.
 type Group struct {
@@ -165,7 +199,7 @@ type Group struct {
 
 // ChatListEntry is a summary of a conversation shown in the user's chat list.
 type ChatListEntry struct {
-	ConversationID string    `json:"conversation_id"` // user UUID for PM, group ID for group
+	ConversationID string    `json:"conversation_id"` // user UUID for PM, group UUID for group
 	IsGroup        bool      `json:"is_group"`
 	Name           string    `json:"name"`
 	PhotoURL       string    `json:"photo_url"`
@@ -174,12 +208,33 @@ type ChatListEntry struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-// TypingEvent signals that a user is typing.
-// Sent client → server; broadcast server → all members of the conversation.
+// ─────────────────────────────────────────────────────────────────────────────
+// System / control frames (server → client only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SystemMessage is a special frame the server sends to convey non-chat events.
+// Clients identify it by checking msg.SenderID == "SYSTEM".
+//
+//	kinds:
+//	  "session"  → payload is the reconnect token string
+//	  "error"    → payload is a human-readable error message
+//	  "ack"      → payload is the message ID that was delivered
+//	  "online"   → payload is a user UUID that came online
+//	  "offline"  → payload is a user UUID that went offline
+//
+// Wire example (token on connect):
+//
+//	{ "kind": "session", "payload": "a1b2c3d4-…" }
+type SystemMessage struct {
+	Kind    string `json:"kind"`
+	Payload string `json:"payload"`
+}
+
+// TypingEvent is broadcast to conversation members when a user starts/stops typing.
 //
 // Wire example:
 //
-//	{ "sender_id": "uuid-alice", "sender_name": "Alice", "target_id": "uuid-bob", "is_group": false, "is_typing": true }
+//	{ "sender_id":"<uuid>","sender_name":"Alice","target_id":"<uuid>","is_group":false,"is_typing":true }
 type TypingEvent struct {
 	SenderID   string `json:"sender_id"`
 	SenderName string `json:"sender_name"`
@@ -195,19 +250,4 @@ type TypingEvent struct {
 //	{ "message_id": "1714000000123-0" }
 type AckEvent struct {
 	MessageID string `json:"message_id"`
-}
-
-// SystemMessage is a special message frame the server sends to the client
-// to communicate session tokens, errors, or system notices.
-//
-// Wire example (session token on connect):
-//
-//	{ "kind": "session", "payload": "a1b2c3d4-..." }
-//
-// Wire example (error):
-//
-//	{ "kind": "error", "payload": "invalid target_id" }
-type SystemMessage struct {
-	Kind    string `json:"kind"` // "session" | "error" | "ack" | "online"
-	Payload string `json:"payload"`
 }

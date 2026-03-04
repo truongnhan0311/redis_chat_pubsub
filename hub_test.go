@@ -97,7 +97,7 @@ func TestHub_DeliverLocally_FullBuffer_Unregisters(t *testing.T) {
 	// Buffer size 0 — any send will immediately trigger the "full" path.
 	client := &Client{
 		user: User{UUID: "u3"},
-		send: make(chan Message, 0),
+		send: make(chan Message),
 	}
 	client.hub = h
 	h.register(client)
