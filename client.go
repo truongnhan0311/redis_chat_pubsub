@@ -62,27 +62,51 @@ func (c *Client) ReadPump(ctx context.Context) {
 		var incoming IncomingMessage
 		if err := json.Unmarshal(raw, &incoming); err != nil {
 			c.logger.Printf("[client] bad message from %s: %v", c.user.UUID, err)
-			c.sendError("invalid JSON: " + err.Error())
+			c.sendError(incoming.ConnID, "invalid JSON: "+err.Error())
 			continue
 		}
 
 		// Validate required fields before doing any work.
 		if err := incoming.Validate(); err != nil {
 			c.logger.Printf("[client] invalid message from %s: %v", c.user.UUID, err)
-			c.sendError(err.Error())
+			c.sendError(incoming.ConnID, err.Error())
 			continue
 		}
 
-		c.hub.handleIncoming(ctx, c, incoming)
+		msg, err := c.hub.handleIncoming(ctx, c, incoming)
+		if err != nil {
+			c.sendError(incoming.ConnID, "internal error: "+err.Error())
+		} else {
+			c.sendAck(incoming.ConnID, msg)
+		}
+	}
+}
+
+// sendAck pushes a JSON ack frame.
+func (c *Client) sendAck(connID string, msg Message) {
+	frame := map[string]any{
+		"kind": "ack",
+		"data": msg,
+	}
+	if connID != "" {
+		frame["conn_id"] = connID
+	}
+	c.logger.Printf("[client] → user=%s ack=%s", c.user.UUID, msg.ID)
+	select {
+	case c.send <- frame:
+	default: // buffer full
 	}
 }
 
 // sendError pushes a JSON error frame directly to the client.
-// Format: { "kind": "error", "data": { "err": "message" } }
-func (c *Client) sendError(errMsg string) {
+// Format: { "kind": "error", "conn_id": "...", "data": { "err": "message" } }
+func (c *Client) sendError(connID, errMsg string) {
 	frame := map[string]any{
 		"kind": "error",
 		"data": map[string]string{"err": errMsg},
+	}
+	if connID != "" {
+		frame["conn_id"] = connID
 	}
 	c.logger.Printf("[client] → user=%s error: %s", c.user.UUID, errMsg)
 	select {
@@ -131,7 +155,7 @@ func (c *Client) WritePump() {
 }
 
 // handleIncoming routes a message from a client through the hub.
-func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming IncomingMessage) {
+func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming IncomingMessage) (Message, error) {
 	// Identity registration — only on FIRST message (when UUID is not yet set).
 	// In the API Server → Chat Server model, the API Server sends the verified
 	// UUID (from JWT) in the first message. After that, the UUID is LOCKED —
@@ -176,11 +200,10 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 		}
 	}
 
-	// 1. Persist to Redis Stream.
 	streamID, err := h.SaveMessage(ctx, msg)
 	if err != nil {
 		h.logger.Printf("[hub] failed to save message: %v", err)
-		return
+		return Message{}, err
 	}
 	msg.ID = streamID
 
@@ -197,6 +220,8 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 		h.Publish(ctx, incoming.TargetID, msg)
 		h.deliverLocally(sender.user.UUID, msg) // echo to sender
 	}
+
+	return msg, nil
 }
 
 // deliverToGroup fans a message out to all group members.

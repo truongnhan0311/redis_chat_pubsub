@@ -153,6 +153,7 @@ type MessageMetadata struct {
 //	}
 type IncomingMessage struct {
 	UUID     string          `json:"uuid"`               // required (direct WS); set by server in mux mode
+	ConnID   string          `json:"conn_id,omitempty"`  // custom correlation ID for ack routing
 	Name     string          `json:"name,omitempty"`     // optional: display name
 	Photo    string          `json:"photo,omitempty"`    // optional: avatar URL
 	Type     MessageType     `json:"type"`               // required: text|image|pdf|voice|video
