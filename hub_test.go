@@ -47,7 +47,7 @@ func TestHub_RegisterAndUnregister(t *testing.T) {
 
 	client := &Client{
 		user: User{UUID: "u1"},
-		send: make(chan Message, 1),
+		send: make(chan any, 1),
 	}
 	client.hub = h
 
@@ -67,7 +67,7 @@ func TestHub_DeliverLocally_Success(t *testing.T) {
 
 	client := &Client{
 		user: User{UUID: "u2"},
-		send: make(chan Message, 4),
+		send: make(chan any, 4),
 	}
 	client.hub = h
 	h.register(client)
@@ -97,7 +97,7 @@ func TestHub_DeliverLocally_FullBuffer_Unregisters(t *testing.T) {
 	// Buffer size 0 — any send will immediately trigger the "full" path.
 	client := &Client{
 		user: User{UUID: "u3"},
-		send: make(chan Message),
+		send: make(chan any),
 	}
 	client.hub = h
 	h.register(client)
@@ -115,7 +115,7 @@ func TestHub_OnlineUsers(t *testing.T) {
 	h := newTestHub()
 
 	for _, uuid := range []string{"ua", "ub", "uc"} {
-		c := &Client{user: User{UUID: uuid}, send: make(chan Message, 1)}
+		c := &Client{user: User{UUID: uuid}, send: make(chan any, 1)}
 		c.hub = h
 		h.register(c)
 	}
