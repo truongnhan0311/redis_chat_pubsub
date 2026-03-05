@@ -152,26 +152,33 @@ type MessageMetadata struct {
 //	  "content":   "Hey everyone!"
 //	}
 type IncomingMessage struct {
-	UUID     string          `json:"uuid"`               // required: sender's user UUID
+	UUID     string          `json:"uuid"`               // required (direct WS); set by server in mux mode
 	Name     string          `json:"name,omitempty"`     // optional: display name
 	Photo    string          `json:"photo,omitempty"`    // optional: avatar URL
 	Type     MessageType     `json:"type"`               // required: text|image|pdf|voice|video
 	TargetID string          `json:"target_id"`          // required: recipient UUID or group UUID
+	To       string          `json:"to,omitempty"`       // alias for target_id (convenience)
 	IsGroup  bool            `json:"is_group,omitempty"` // true = group message
 	Content  string          `json:"content"`            // required: text or media URL
 	Metadata MessageMetadata `json:"metadata,omitempty"`
 }
 
 // Validate returns an error if any required field is missing or invalid.
+// It also resolves the "to" alias for "target_id".
 func (m *IncomingMessage) Validate() error {
+	// Resolve "to" alias → "target_id"
+	if m.TargetID == "" && m.To != "" {
+		m.TargetID = m.To
+	}
+
 	if m.UUID == "" {
 		return fmt.Errorf("uuid is required")
 	}
 	if !validMessageTypes[m.Type] {
-		return fmt.Errorf("unknown type %q (valid: text|image|pdf|voice|video)", m.Type)
+		return fmt.Errorf("type %q is invalid (valid: text|image|pdf|voice|video)", m.Type)
 	}
 	if m.TargetID == "" {
-		return fmt.Errorf("target_id is required")
+		return fmt.Errorf("target_id (or 'to') is required")
 	}
 	if m.Content == "" {
 		return fmt.Errorf("content is required")
