@@ -124,7 +124,7 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 		if incoming.Photo != "" {
 			sender.user.PhotoURL = incoming.Photo
 		}
-		h.clients[sender.user.UUID] = sender
+		h.clients[sender.user.UUID] = append(h.clients[sender.user.UUID], sender)
 		h.mu.Unlock()
 		h.logger.Printf("[hub] client identified: uuid=%s name=%s", sender.user.UUID, sender.user.Name)
 	}

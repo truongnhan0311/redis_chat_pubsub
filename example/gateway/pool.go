@@ -147,21 +147,24 @@ func (p *Pool) maintainSlot(ctx context.Context, s *slot) {
 
 		p.cfg.Logger.Info("pool: slot connected", "slot", s.idx)
 
-		// Re-register users that were on this slot.
+		// Re-register users still assigned to this slot after reconnect.
+		// IMPORTANT: only re-claim users where userSlot[uid] == s.idx.
+		// Users that migrated away (userSlot[uid] != s.idx) should NOT be
+		// pulled back — they are being served by another healthy slot.
 		s.userMu.RLock()
 		affected := make([]string, 0, len(s.users))
 		for uid := range s.users {
-			affected = append(affected, uid)
+			p.mu.RLock()
+			assignedSlot := p.userSlot[uid]
+			p.mu.RUnlock()
+			if assignedSlot == s.idx { // only re-claim if still assigned here
+				affected = append(affected, uid)
+			}
 		}
 		s.userMu.RUnlock()
 
 		for _, uid := range affected {
-			p.mu.RLock()
-			// Get display info (stored when user was first seen).
-			// In production you'd look this up from your user store.
-			p.mu.RUnlock()
-			// Re-register with minimal info — Chat Server migrates the user.
-			p.sendOnSlot(s, uid, "", "", nil)
+			p.sendOnSlot(s, uid, "", "", nil) // re-register with empty data
 		}
 
 		// Read loop — blocks until connection closes.

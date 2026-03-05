@@ -12,23 +12,29 @@ import (
 
 const (
 	pubSubChannel  = "chat:pubsub:global"
-	sendBufferSize = 256 // Buffered channel size per client (graceful degradation)
+	sendBufferSize = 256
 )
 
-// pubSubEnvelope wraps a message for cross-server delivery via Redis Pub/Sub.
 type pubSubEnvelope struct {
-	RecipientID string  `json:"recipient_id"` // UUID of the intended recipient
+	RecipientID string  `json:"recipient_id"`
 	Message     Message `json:"message"`
 }
 
-// Hub is the central coordinator:
-//   - Tracks all WebSocket clients (direct + mux virtual) on this server node.
-//   - Subscribes to Redis Pub/Sub to receive messages from other nodes.
-//   - Delivers messages locally or publishes them for cross-node delivery.
+// Hub is the central coordinator.
+// It tracks both direct WebSocket clients and virtual mux clients,
+// supports multi-device (same user_id on multiple connections),
+// and fans out messages to all devices of a user.
 type Hub struct {
-	clients  map[string]*Client     // userUUID → Client (direct WS or virtual mux)
-	gateways map[string]*muxGateway // gatewayID → muxGateway (API Server connections)
-	muxUsers map[string]*muxGateway // userUUID → which gateway they are on
+	// Direct WebSocket clients (client → chat server).
+	// Slice supports multi-device: same user on phone + laptop = 2 entries.
+	clients map[string][]*Client // userUUID → []*Client
+
+	// Mux gateway connections (API Server → chat server).
+	gateways    map[string]*muxGateway // gatewayID → muxGateway
+	muxConns    map[string]*Client     // connID → virtual Client
+	muxGateways map[string]*muxGateway // connID → which gateway it's on
+	userConns   map[string][]string    // userID → []connID (all devices for this user)
+
 	mu       sync.RWMutex
 	redis    *redis.Client
 	sessions *sessionManager
@@ -36,38 +42,54 @@ type Hub struct {
 	logger   *log.Logger
 }
 
-// newHub constructs a Hub. Call Hub.Run(ctx) in a goroutine to start processing.
 func newHub(rdb *redis.Client, sm *sessionManager, gm *groupManager, logger *log.Logger) *Hub {
 	return &Hub{
-		clients:  make(map[string]*Client),
-		gateways: make(map[string]*muxGateway),
-		muxUsers: make(map[string]*muxGateway),
-		redis:    rdb,
-		sessions: sm,
-		groups:   gm,
-		logger:   logger,
+		clients:     make(map[string][]*Client),
+		gateways:    make(map[string]*muxGateway),
+		muxConns:    make(map[string]*Client),
+		muxGateways: make(map[string]*muxGateway),
+		userConns:   make(map[string][]string),
+		redis:       rdb,
+		sessions:    sm,
+		groups:      gm,
+		logger:      logger,
 	}
 }
 
-// register adds a client to the hub.
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct WS client registration
+// ─────────────────────────────────────────────────────────────────────────────
+
+// register adds a direct WS client. Multiple clients per user supported (multi-device).
 func (h *Hub) register(client *Client) {
 	h.mu.Lock()
-	h.clients[client.user.UUID] = client
+	h.clients[client.user.UUID] = append(h.clients[client.user.UUID], client)
 	h.mu.Unlock()
 }
 
-// unregister removes a client from the hub (called on disconnect).
+// unregister removes a specific direct WS client (called on disconnect).
 func (h *Hub) unregister(client *Client) {
 	h.mu.Lock()
-	if c, ok := h.clients[client.user.UUID]; ok && c == client {
-		delete(h.clients, client.user.UUID)
-		close(client.send)
+	list := h.clients[client.user.UUID]
+	updated := list[:0]
+	for _, c := range list {
+		if c != client {
+			updated = append(updated, c)
+		}
 	}
+	if len(updated) == 0 {
+		delete(h.clients, client.user.UUID)
+	} else {
+		h.clients[client.user.UUID] = updated
+	}
+	close(client.send)
 	h.mu.Unlock()
 }
 
-// Run subscribes to Redis Pub/Sub and dispatches incoming cross-node messages.
-// Must be run in its own goroutine.
+// ─────────────────────────────────────────────────────────────────────────────
+// Pub/Sub run loop
+// ─────────────────────────────────────────────────────────────────────────────
+
 func (h *Hub) Run(ctx context.Context) {
 	pubsub := h.redis.Subscribe(ctx, pubSubChannel)
 	defer pubsub.Close()
@@ -94,16 +116,15 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
-// Publish sends a message to a recipient. If the recipient is connected to
-// this node, the message is delivered directly; otherwise it is published to
-// Redis so another node can deliver it.
+// ─────────────────────────────────────────────────────────────────────────────
+// Delivery
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Publish delivers a message to a recipient — locally first, then via Redis Pub/Sub.
 func (h *Hub) Publish(ctx context.Context, recipientID string, msg Message) error {
-	// Fast path: recipient is on this node.
 	if delivered := h.deliverLocally(recipientID, msg); delivered {
 		return nil
 	}
-
-	// Slow path: publish to Redis for cross-node delivery.
 	env := pubSubEnvelope{RecipientID: recipientID, Message: msg}
 	data, err := json.Marshal(env)
 	if err != nil {
@@ -112,43 +133,72 @@ func (h *Hub) Publish(ctx context.Context, recipientID string, msg Message) erro
 	return h.redis.Publish(ctx, pubSubChannel, data).Err()
 }
 
-// deliverLocally tries to push a message to a locally connected client.
-// Returns true if the client was found and the message was queued.
+// deliverLocally fans out a message to ALL connections for recipientID:
+//   - All direct WS clients (phone + laptop both connected directly)
+//   - All mux virtual clients (phone via API node 1, laptop via API node 2)
+//
+// Returns true if delivered to at least one connection.
 func (h *Hub) deliverLocally(recipientID string, msg Message) bool {
+	delivered := false
+
+	// ── Direct WS clients (fan-out to all devices) ───────────────────────────
 	h.mu.RLock()
-	client, ok := h.clients[recipientID]
+	directClients := make([]*Client, len(h.clients[recipientID]))
+	copy(directClients, h.clients[recipientID])
 	h.mu.RUnlock()
 
-	if !ok {
-		return false
+	var directBroken []*Client
+	for _, c := range directClients {
+		select {
+		case c.send <- msg:
+			delivered = true
+		default:
+			directBroken = append(directBroken, c)
+		}
+	}
+	for _, c := range directBroken {
+		h.logger.Printf("[hub] direct client %s buffer full, disconnecting", recipientID)
+		h.unregister(c)
 	}
 
-	select {
-	case client.send <- msg:
-		return true
-	default:
-		// Client's send buffer is full — considered unhealthy, disconnect it.
-		h.logger.Printf("[hub] client %s send buffer full, disconnecting", recipientID)
-		h.unregister(client)
-		return false
+	// ── Mux virtual clients (fan-out to all devices) ─────────────────────────
+	if h.deliverToMuxUser(recipientID, msg) {
+		delivered = true
 	}
+
+	return delivered
 }
 
-// OnlineUsers returns the list of UUIDs currently connected to this node.
+// ─────────────────────────────────────────────────────────────────────────────
+// Online / IsOnline
+// ─────────────────────────────────────────────────────────────────────────────
+
+// OnlineUsers returns user UUIDs currently connected to this node (direct + mux).
 func (h *Hub) OnlineUsers() []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	uuids := make([]string, 0, len(h.clients))
+
+	seen := make(map[string]bool)
 	for uuid := range h.clients {
+		seen[uuid] = true
+	}
+	for userID := range h.userConns {
+		seen[userID] = true
+	}
+	uuids := make([]string, 0, len(seen))
+	for uuid := range seen {
 		uuids = append(uuids, uuid)
 	}
 	return uuids
 }
 
-// IsOnline checks if a user is connected to this specific node.
+// IsOnline checks if a user has at least one active connection on this node.
 func (h *Hub) IsOnline(userUUID string) bool {
 	h.mu.RLock()
-	_, ok := h.clients[userUUID]
-	h.mu.RUnlock()
-	return ok
+	defer h.mu.RUnlock()
+	if list, ok := h.clients[userUUID]; ok && len(list) > 0 {
+		return true
+	}
+	_, hasMux := h.userConns[userUUID]
+	return hasMux
 }
