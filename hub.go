@@ -22,11 +22,13 @@ type pubSubEnvelope struct {
 }
 
 // Hub is the central coordinator:
-//   - Tracks all WebSocket clients connected to this server node.
+//   - Tracks all WebSocket clients (direct + mux virtual) on this server node.
 //   - Subscribes to Redis Pub/Sub to receive messages from other nodes.
 //   - Delivers messages locally or publishes them for cross-node delivery.
 type Hub struct {
-	clients  map[string]*Client // userUUID → Client
+	clients  map[string]*Client     // userUUID → Client (direct WS or virtual mux)
+	gateways map[string]*muxGateway // gatewayID → muxGateway (API Server connections)
+	muxUsers map[string]*muxGateway // userUUID → which gateway they are on
 	mu       sync.RWMutex
 	redis    *redis.Client
 	sessions *sessionManager
@@ -38,6 +40,8 @@ type Hub struct {
 func newHub(rdb *redis.Client, sm *sessionManager, gm *groupManager, logger *log.Logger) *Hub {
 	return &Hub{
 		clients:  make(map[string]*Client),
+		gateways: make(map[string]*muxGateway),
+		muxUsers: make(map[string]*muxGateway),
 		redis:    rdb,
 		sessions: sm,
 		groups:   gm,

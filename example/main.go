@@ -103,12 +103,31 @@ func main() {
 			log.Error("ws upgrade failed", "error", err)
 			return
 		}
-
-		// UUID is not required at connect — it comes in the first message.
-		// We pass an empty User here; handleIncoming will fill the real UUID.
+		// UUID comes from first message — no params needed at connect.
 		module.Connect(conn, chat.ConnectOptions{
 			ReconnectToken: r.URL.Query().Get("token"),
 		})
+	}))
+
+	// ── /ws/mux — Multiplexed gateway endpoint (API Server → Chat Server) ─────
+	//
+	// API Server maintains a POOL of N connections here.
+	// Each connection carries messages for many users simultaneously.
+	// Pool management (reconnect, rebalance) is the API Server's responsibility.
+	//
+	// Inbound frame:  { "user_id":"alice","user_name":"Alice","data":{...msg...} }
+	// Outbound frame: { "user_id":"bob", "kind":"message", "data":{...msg...} }
+	//
+	// On disconnect: Chat Server unregisters all users on that connection.
+	// API Server detects drop → reconnects → re-registers affected users.
+	wsMux.Handle("/ws/mux", module.APIKeyMiddlewareFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Error("ws/mux upgrade failed", "error", err)
+			return
+		}
+		log.Info("mux gateway connection established", "remote", r.RemoteAddr)
+		module.ConnectMux(conn) // blocks until gateway disconnects
 	}))
 
 	wsServer := &http.Server{Addr: cfg.WSAddr, Handler: wsMux}

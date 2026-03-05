@@ -108,16 +108,15 @@ func (c *Client) WritePump() {
 
 // handleIncoming routes a message from a client through the hub.
 func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming IncomingMessage) {
-	// The sender's UUID comes from the message itself.
-	// If it differs from what we have (e.g. the temp auto-generated UUID),
-	// re-register the client under the correct UUID.
-	if incoming.UUID != "" && incoming.UUID != sender.user.UUID {
+	// Identity registration — only on FIRST message (when UUID is not yet set).
+	// In the API Server → Chat Server model, the API Server sends the verified
+	// UUID (from JWT) in the first message. After that, the UUID is LOCKED —
+	// clients cannot change their identity mid-session.
+	if sender.user.UUID == "" && incoming.UUID != "" {
 		h.mu.Lock()
-		// Remove old temp registration.
-		if c, ok := h.clients[sender.user.UUID]; ok && c == sender {
-			delete(h.clients, sender.user.UUID)
-		}
-		// Update client identity.
+		// Remove the empty-key placeholder if registered.
+		delete(h.clients, "")
+		// Set real identity.
 		sender.user.UUID = incoming.UUID
 		if incoming.Name != "" {
 			sender.user.Name = incoming.Name
@@ -125,10 +124,12 @@ func (h *Hub) handleIncoming(ctx context.Context, sender *Client, incoming Incom
 		if incoming.Photo != "" {
 			sender.user.PhotoURL = incoming.Photo
 		}
-		// Register under the real UUID.
 		h.clients[sender.user.UUID] = sender
 		h.mu.Unlock()
+		h.logger.Printf("[hub] client identified: uuid=%s name=%s", sender.user.UUID, sender.user.Name)
 	}
+	// After identity is set, ignore any uuid field in subsequent messages
+	// — the connection's identity is fixed for the session lifetime.
 
 	msg := Message{
 		Type:        incoming.Type,
