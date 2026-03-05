@@ -56,19 +56,39 @@ func (c *Client) ReadPump(ctx context.Context) {
 			break
 		}
 
+		// Log raw inbound frame.
+		c.logger.Printf("[client] ← user=%s raw: %s", c.user.UUID, string(raw))
+
 		var incoming IncomingMessage
 		if err := json.Unmarshal(raw, &incoming); err != nil {
 			c.logger.Printf("[client] bad message from %s: %v", c.user.UUID, err)
+			c.sendError("invalid JSON: " + err.Error())
 			continue
 		}
 
 		// Validate required fields before doing any work.
 		if err := incoming.Validate(); err != nil {
 			c.logger.Printf("[client] invalid message from %s: %v", c.user.UUID, err)
+			c.sendError(err.Error())
 			continue
 		}
 
 		c.hub.handleIncoming(ctx, c, incoming)
+	}
+}
+
+// sendError pushes a JSON error frame directly to the client.
+// Format: { "kind": "error", "data": { "err": "message" } }
+func (c *Client) sendError(errMsg string) {
+	frame := map[string]any{
+		"kind": "error",
+		"data": map[string]string{"err": errMsg},
+	}
+	c.logger.Printf("[client] → user=%s error: %s", c.user.UUID, errMsg)
+	select {
+	case c.send <- frame:
+	default:
+		// buffer full — skip error delivery, connection is unhealthy
 	}
 }
 
@@ -95,6 +115,10 @@ func (c *Client) WritePump() {
 			if err := c.conn.WriteJSON(frame); err != nil {
 				c.logger.Printf("[client] write error for %s: %v", c.user.UUID, err)
 				return
+			}
+			// Log outbound frame.
+			if raw, err := json.Marshal(frame); err == nil {
+				c.logger.Printf("[client] → user=%s raw: %s", c.user.UUID, string(raw))
 			}
 
 		case <-ticker.C:
