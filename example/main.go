@@ -76,12 +76,12 @@ func main() {
 	// ─────────────────────────────────────────────────────────────────────────
 	//
 	// Connect:
-	//   ws://localhost:8080/ws
+	//   ws://localhost:8080/ws?uuid=user-bob-002
 	//   Header: X-API-Key: <key>   (or ?api_key=<key>)
 	//
 	// After connecting, send a JSON message:
 	//   {
-	//     "uuid":      "user-alice-001",   ← sender UUID
+	//     "uuid":      "user-alice-001",   ← (optional if passed in URL)
 	//     "name":      "Alice",            ← optional
 	//     "type":      "text",
 	//     "target_id": "user-bob-002",     ← PM recipient UUID
@@ -103,8 +103,14 @@ func main() {
 			log.Error("ws upgrade failed", "error", err)
 			return
 		}
-		// UUID comes from first message — no params needed at connect.
+		// Identity can be provided via query params (e.g., ?uuid=bob-002)
+		// OR via the first JSON message sent over the socket.
 		module.Connect(conn, chat.ConnectOptions{
+			User: chat.User{
+				UUID:     r.URL.Query().Get("uuid"),
+				Name:     r.URL.Query().Get("name"),
+				PhotoURL: r.URL.Query().Get("photo"),
+			},
 			ReconnectToken: r.URL.Query().Get("token"),
 		})
 	}))
@@ -228,10 +234,10 @@ func main() {
 	// ── 8. Print quick-test cheatsheet ───────────────────────────────────────
 	log.Info("──────────────────────────────────────────")
 	log.Info("QUICK TEST — open 2 WebSocket connections:")
-	log.Info("  Alice", "connect", "ws://localhost"+cfg.WSAddr+"/ws")
-	log.Info("  Bob  ", "connect", "ws://localhost"+cfg.WSAddr+"/ws")
+	log.Info("  Alice", "connect", "ws://localhost"+cfg.WSAddr+"/ws?uuid=user-alice-001")
+	log.Info("  Bob  ", "connect", "ws://localhost"+cfg.WSAddr+"/ws?uuid=user-bob-002")
 	log.Info("Send from Alice → Bob:")
-	log.Info(`  {"uuid":"user-alice-001","name":"Alice","type":"text","target_id":"user-bob-002","is_group":false,"content":"Hello Bob!"}`)
+	log.Info(`  {"type":"text","to":"user-bob-002","is_group":false,"content":"Hello Bob!"}`)
 	log.Info("Send to group:")
 	log.Info(`  {"uuid":"user-alice-001","type":"text","target_id":"demo-group-001","is_group":true,"content":"Hey group!"}`)
 	log.Info("REST: GET users list", "url", "http://localhost"+cfg.HTTPAddr+"/users")

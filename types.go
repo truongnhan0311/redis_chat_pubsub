@@ -164,16 +164,14 @@ type IncomingMessage struct {
 }
 
 // Validate returns an error if any required field is missing or invalid.
-// It also resolves the "to" alias for "target_id".
+// uuid is NOT validated here — it is only required on the FIRST message
+// to establish identity; subsequent messages use the connection's stored identity.
 func (m *IncomingMessage) Validate() error {
 	// Resolve "to" alias → "target_id"
 	if m.TargetID == "" && m.To != "" {
 		m.TargetID = m.To
 	}
 
-	if m.UUID == "" {
-		return fmt.Errorf("uuid is required")
-	}
 	if !validMessageTypes[m.Type] {
 		return fmt.Errorf("type %q is invalid (valid: text|image|pdf|voice|video)", m.Type)
 	}
