@@ -177,36 +177,67 @@ func (gw *muxGateway) runMux(ctx context.Context) {
 			return
 		}
 
+		// ── Log raw inbound frame (debug) ─────────────────────────────────────
+		gw.logger.Printf("[mux] ← gateway %s raw: %s", gw.id[:8], string(raw))
+
+		// ── Parse envelope ────────────────────────────────────────────────────
 		var inbound MuxInbound
 		if err := json.Unmarshal(raw, &inbound); err != nil {
 			gw.logger.Printf("[mux] bad frame from gateway %s: %v", gw.id[:8], err)
+			gw.sendError("", "", "invalid JSON: "+err.Error())
 			continue
 		}
+
+		gw.logger.Printf("[mux] ← conn=%s user=%s type=%s target=%s",
+			inbound.ConnID, inbound.UserID, inbound.Data.Type, inbound.Data.TargetID)
+
+		// ── Validate required fields ──────────────────────────────────────────
 		if inbound.UserID == "" {
 			gw.logger.Printf("[mux] missing user_id from gateway %s", gw.id[:8])
+			gw.sendError(inbound.ConnID, "", "user_id is required")
 			continue
 		}
+
 		// Auto-generate conn_id if API Server didn't provide one (single-device mode).
 		if inbound.ConnID == "" {
 			inbound.ConnID = inbound.UserID
 		}
 
-		// Register this device connection (creates virtual client if new,
-		// migrates to this gateway if already existed on another gateway).
+		// ── Register device connection ────────────────────────────────────────
 		gw.hub.registerMuxConn(inbound.ConnID, inbound.UserID,
 			inbound.UserName, inbound.UserPhoto, gw)
 
-		// Route message through the hub.
+		// ── Validate message payload ──────────────────────────────────────────
 		msg := inbound.Data
 		msg.UUID = inbound.UserID // trust the API Server's user_id
 		if err := msg.Validate(); err != nil {
 			gw.logger.Printf("[mux] invalid msg conn=%s user=%s: %v",
 				inbound.ConnID, inbound.UserID, err)
+			gw.sendError(inbound.ConnID, inbound.UserID, err.Error())
 			continue
 		}
+
+		// ── Route through hub ─────────────────────────────────────────────────
 		if client, ok := gw.hub.getMuxVirtualClient(inbound.ConnID); ok {
 			gw.hub.handleIncoming(ctx, client, msg)
 		}
+	}
+}
+
+// sendError writes a JSON error frame back to the API Server.
+// Format: { "conn_id": "...", "user_id": "...", "kind": "error", "data": { "err": "message" } }
+func (gw *muxGateway) sendError(connID, userID, errMsg string) {
+	frame := MuxOutbound{
+		ConnID: connID,
+		UserID: userID,
+		Kind:   "error",
+		Data:   map[string]string{"err": errMsg},
+	}
+	gw.writeMu.Lock()
+	defer gw.writeMu.Unlock()
+	gw.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	if err := gw.conn.WriteJSON(frame); err != nil {
+		gw.logger.Printf("[mux] failed to send error frame: %v", err)
 	}
 }
 
